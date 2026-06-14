@@ -155,7 +155,7 @@ def Floor1() -> BehaviorTree:
                 name='Floor1_Route_A',
             ),
             BT.MoveAndDialog((-7400., -9462.), dialog_id=QUEST_ACCEPT_DIALOG),
-            _follower_npc_dialog_node(QUEST_ACCEPT_DIALOG, (-7400., -9462.)),
+            _follower_npc_dialog_node(QUEST_ACCEPT_DIALOG),
             BT.VanquishNode([(-9672., -3286.)],  clear_area_radius=TUNNELS_AGGRO_RANGE, name='Floor1_Pt4'),
             BT.LootItems(),
             BT.VanquishNode([(-11186., -1788.)], clear_area_radius=TUNNELS_AGGRO_RANGE, name='Floor1_Pt5'),
@@ -197,39 +197,25 @@ def Floor2() -> BehaviorTree:
 
 def _follower_npc_dialog_node(
     dialog_id: int,
-    npc_search_pos: tuple,
-    search_radius: float = 400.0,
     per_account_wait_ms: int = 8000,
 ) -> BehaviorTree:
     """Send a dialog to an NPC on all follower accounts.
 
-    Finds the nearest NPC to npc_search_pos, sends SendDialogToTarget to every
-    follower directly via ShMem (bypassing SendAndWait timeout), then waits
-    per_account_wait_ms per follower for the handlers to complete.
+    Captures the leader's current target (set by MoveAndDialog immediately
+    before this node), sends SendDialogToTarget to every follower directly
+    via ShMem, then waits per_account_wait_ms per follower to complete.
+    Uses an ActionNode for immediate dispatch (no throttle delay) followed
+    by a WaitUntilNode for the timer.
     """
-    state: dict = {"initialized": False, "done_at_ms": 0}
+    state: dict = {"done_at_ms": 0}
 
-    def _run(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
+    def _dispatch(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
         from Py4GWCoreLib.GlobalCache import GLOBAL_CACHE
-        from Py4GWCoreLib import Player, AgentArray
+        from Py4GWCoreLib import Player
         from Py4GWCoreLib.enums_src.Multiboxing_enums import SharedCommandType
         from Py4GWCoreLib.Py4GWcorelib import Utils
 
-        now = int(Utils.GetBaseTimestamp())
-
-        if state["initialized"]:
-            return (
-                BehaviorTree.NodeState.SUCCESS
-                if now >= state["done_at_ms"]
-                else BehaviorTree.NodeState.RUNNING
-            )
-
-        state["initialized"] = True
-
-        npc_ids = list(AgentArray.GetNPCMinipetArray() or [])
-        npc_ids = list(AgentArray.Filter.ByDistance(npc_ids, npc_search_pos, search_radius) or [])
-        npc_id = int(npc_ids[0]) if npc_ids else 0
-
+        npc_id = int(Player.GetTargetID() or 0)
         sender_email = str(Player.GetAccountEmail() or "")
         followers = [
             a for a in (GLOBAL_CACHE.ShMem.GetAllAccountData() or [])
@@ -248,26 +234,35 @@ def _follower_npc_dialog_node(
                         (float(npc_id), float(dialog_id), 0.0, 0.0),
                     )
 
-        state["done_at_ms"] = now + max(5000, num_followers * per_account_wait_ms)
-        return BehaviorTree.NodeState.RUNNING
+        state["done_at_ms"] = int(Utils.GetBaseTimestamp()) + (num_followers * per_account_wait_ms if num_followers > 0 else 0)
+        return BehaviorTree.NodeState.SUCCESS
 
-    tree = BehaviorTree(
-        BehaviorTree.WaitUntilNode(
-            name="FollowerNpcDialog",
-            condition_fn=_run,
-            throttle_interval_ms=500,
-            timeout_ms=90000,
+    def _wait(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
+        from Py4GWCoreLib.Py4GWcorelib import Utils
+        now = int(Utils.GetBaseTimestamp())
+        return (
+            BehaviorTree.NodeState.SUCCESS
+            if now >= state["done_at_ms"]
+            else BehaviorTree.NodeState.RUNNING
         )
+
+    return RoutinesBT.Composite.Sequence(
+        BehaviorTree(
+            BehaviorTree.ActionNode(
+                name="FollowerNpcDialogDispatch",
+                action_fn=_dispatch,
+            )
+        ),
+        BehaviorTree(
+            BehaviorTree.WaitUntilNode(
+                name="FollowerNpcDialogWait",
+                condition_fn=_wait,
+                throttle_interval_ms=500,
+                timeout_ms=90000,
+            )
+        ),
+        name="FollowerNpcDialog",
     )
-    orig_reset = tree.root.reset
-
-    def _reset() -> None:
-        state["initialized"] = False
-        state["done_at_ms"] = 0
-        orig_reset()
-
-    tree.root.reset = _reset
-    return tree
 
 
 def _open_chest_sequential_node() -> BehaviorTree:
@@ -277,15 +272,13 @@ def _open_chest_sequential_node() -> BehaviorTree:
     This triggers the cascade so each follower opens it in sequence, waiting
     long enough for all interactions to complete before the bot moves on.
     """
-    CHEST_POS = (-16066., -8370.)
-    CHEST_SEARCH_RADIUS = 600.0
     PER_ACCOUNT_WAIT_MS = 5000  # 5 s per follower for chest-open animation + round-trip
 
     state: dict = {"initialized": False, "done_at_ms": 0}
 
     def _run(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
         from Py4GWCoreLib.GlobalCache import GLOBAL_CACHE
-        from Py4GWCoreLib import Player, Party, AgentArray
+        from Py4GWCoreLib import Player, Party
         from Py4GWCoreLib.enums_src.Multiboxing_enums import SharedCommandType
         from Py4GWCoreLib.Py4GWcorelib import Utils
 
@@ -300,10 +293,8 @@ def _open_chest_sequential_node() -> BehaviorTree:
 
         state["initialized"] = True
 
-        # Find the chest gadget near its spawn point
-        gadget_ids = list(AgentArray.GetGadgetArray() or [])
-        gadget_ids = list(AgentArray.Filter.ByDistance(gadget_ids, CHEST_POS, CHEST_SEARCH_RADIUS) or [])
-        chest_id = int(gadget_ids[0]) if gadget_ids else 0
+        # Use the leader's current target — set by MoveAndInteractWithGadget immediately before
+        chest_id = int(Player.GetTargetID() or 0)
 
         sender_email = str(Player.GetAccountEmail() or "")
         followers = [
@@ -410,7 +401,7 @@ def Floor3() -> BehaviorTree:
             ),
             # Collect quest reward then open chest
             BT.MoveAndDialog((-16098., -8626.), dialog_id=QUEST_REWARD_DIALOG),
-            _follower_npc_dialog_node(QUEST_REWARD_DIALOG, (-16098., -8626.)),
+            _follower_npc_dialog_node(QUEST_REWARD_DIALOG),
             BT.MoveAndInteractWithGadget((-16066., -8370.)),  # Leader opens chest
             _open_chest_sequential_node(),                     # Followers open chest in party-position order
             BT.LootItems(),
