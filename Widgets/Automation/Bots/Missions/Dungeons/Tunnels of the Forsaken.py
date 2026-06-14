@@ -62,6 +62,29 @@ def _draw_bot_config() -> None:
         _save_settings()
 
 
+def _draw_help_page() -> None:
+    import PyImGui
+    PyImGui.text('Tunnels of the Forsaken Farm')
+    PyImGui.separator()
+    PyImGui.text('Requirements')
+    PyImGui.separator()
+    PyImGui.text('- Multi-account bot: requires at least one follower account.')
+    PyImGui.text('- Althea the Healer must have been unlocked in a previous run.')
+    PyImGui.text('- No consumables required.')
+    PyImGui.text('- Hard Mode toggle available in the Bot Config tab.')
+    PyImGui.separator()
+    PyImGui.text('Tested Setup')
+    PyImGui.separator()
+    PyImGui.text('- Tested in Normal Mode only.')
+    PyImGui.text('- Tested with: TaO Ranger, Panic Mesmer, Inept Mesmer, SoS Healer.')
+    PyImGui.separator()
+    PyImGui.text('Route')
+    PyImGui.separator()
+    PyImGui.text('- Travels to Piken Square, enters The Breach, then clears all 3 floors.')
+    PyImGui.text('- Accepts and rewards The Dreamer and the Zealot quest automatically.')
+    PyImGui.text('- Abandons and re-takes the quest at the start of each run.')
+
+
 def ensure_botting_tree() -> BottingTree:
     global botting_tree
 
@@ -76,6 +99,7 @@ def ensure_botting_tree() -> BottingTree:
                 consumable_upkeeps=CONSUMABLE_UPKEEPS,
             ),
         )
+        botting_tree.UI.override_draw_help(_draw_help_page)
 
     return botting_tree
 
