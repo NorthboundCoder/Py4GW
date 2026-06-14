@@ -154,7 +154,7 @@ def Floor1() -> BehaviorTree:
                 clear_area_radius=TUNNELS_AGGRO_RANGE,
                 name='Floor1_Route_A',
             ),
-            BT.MoveAndDialog((-7400., -9462.), dialog_id=QUEST_ACCEPT_DIALOG, multi_account=True),
+            BT.MoveAndAutoDialog((-7400., -9462.), buttons=0, multi_account=True),
             BT.VanquishNode([(-9672., -3286.)],  clear_area_radius=TUNNELS_AGGRO_RANGE, name='Floor1_Pt4'),
             BT.LootItems(),
             BT.VanquishNode([(-11186., -1788.)], clear_area_radius=TUNNELS_AGGRO_RANGE, name='Floor1_Pt5'),
@@ -333,7 +333,7 @@ def Floor3() -> BehaviorTree:
                 name='Floor3_Route_D',
             ),
             # Collect quest reward then open chest
-            BT.MoveAndDialog((-16098., -8626.), dialog_id=QUEST_REWARD_DIALOG, multi_account=True),
+            BT.MoveAndAutoDialog((-16098., -8626.), buttons=0, multi_account=True),
             BT.MoveAndInteractWithGadget((-16066., -8370.)),  # Leader opens chest
             _open_chest_sequential_node(),                     # Followers open chest in party-position order
             BT.LootItems(),
