@@ -261,28 +261,15 @@ def _open_chest_sequential_node() -> BehaviorTree:
         num_followers = len(followers)
 
         if chest_id > 0 and followers:
-            players_list = list(Party.GetPlayers() or [])
-
-            def _party_pos(account) -> int:
-                agent_id = int(getattr(account, "PlayerID", 0) or 0)
-                for i, p in enumerate(players_list):
-                    login = int(getattr(p, "login_number", 0) or 0)
-                    if not login:
-                        continue
-                    pid = int(Party.Players.GetAgentIDByLoginNumber(login) or 0)
-                    if pid == agent_id:
-                        return i
-                return 999
-
-            followers.sort(key=_party_pos)
-            first_email = str(getattr(followers[0], "AccountEmail", "") or "")
-            if first_email:
-                GLOBAL_CACHE.ShMem.SendMessage(
-                    sender_email,
-                    first_email,
-                    SharedCommandType.OpenChest,
-                    (float(chest_id), 1.0, 0.0, 0.0),
-                )
+            for follower in followers:
+                email = str(getattr(follower, "AccountEmail", "") or "")
+                if email:
+                    GLOBAL_CACHE.ShMem.SendMessage(
+                        sender_email,
+                        email,
+                        SharedCommandType.OpenChest,
+                        (float(chest_id), 1.0, 0.0, 0.0),
+                    )
 
         state["done_at_ms"] = now + max(3000, num_followers * PER_ACCOUNT_WAIT_MS)
         return BehaviorTree.NodeState.RUNNING
