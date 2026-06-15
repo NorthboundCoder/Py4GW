@@ -28,6 +28,11 @@ DREAMER_AND_ZEALOT_QUEST_ID = 1461
 QUEST_ACCEPT_DIALOG         = 0x85B501
 QUEST_REWARD_DIALOG         = 0x85B507
 
+# ── Important interaction positions ─────────────────────────────────────────
+QUEST_NPC_POS               = (-7400., -9462.)
+QUEST_REWARD_NPC_POS        = (-16098., -8626.)
+DUNGEON_CHEST_POS           = (-16066., -8370.)
+
 # ── Aggro range ($RANGE_SPELLCAST + 100 from AutoIt) ─────────────────────────
 TUNNELS_AGGRO_RANGE = Range.Spellcast.value + 100.0
 
@@ -150,7 +155,11 @@ def TheBreachApproach() -> BehaviorTree:
         name='The Breach Approach',
         children=[
             BT.MoveAndExitMap(
-                [(21030., 9015.), (20255., 8712.), (20180., 7500.)],
+                [
+                    (21030., 9015.), 
+                    (20255., 8712.), 
+                    (20180., 7500.)
+                ],
                 THE_BREACH,
             ),
             BT.VanquishNode(
@@ -163,11 +172,9 @@ def TheBreachApproach() -> BehaviorTree:
     )
 
 
-def Floor1() -> BehaviorTree:
-    # Clear to the quest NPC, take the quest, pick up three Elemental Keystones
-    # across points 4-6, then exit to Floor 2.
+def Floor1ToNPC() -> BehaviorTree:
     return BT.Sequence(
-        name='Floor 1',
+        name='Floor 1 to NPC',
         children=[
             BT.VanquishNode(
                 [
@@ -178,8 +185,140 @@ def Floor1() -> BehaviorTree:
                 clear_area_radius=TUNNELS_AGGRO_RANGE,
                 name='Floor1_Route_A',
             ),
-            BT.MoveAndDialog((-7400., -9462.), dialog_id=QUEST_ACCEPT_DIALOG),
-            _follower_npc_dialog_node(QUEST_ACCEPT_DIALOG),
+        ],
+    )
+
+
+def _follower_npc_dialog_node(
+    dialog_id: int,
+    per_account_wait_ms: int = 2000,
+    name: str = "FollowerNpcDialog",
+) -> BehaviorTree:
+    """Dispatch a quest/reward dialog to same-party follower accounts.
+
+    Must be placed immediately after BT.MoveAndInteract in a Sequence.
+    SequenceNode._tick_impl advances children via a while-loop in a single call,
+    so the leader's current target is still the NPC when _dispatch fires —
+    no additional target capture is needed.
+
+    Uses SendDialogToTarget (agent-ID based) instead of SendManualDialog
+    (coordinate-search based) to avoid relying on TargetNearestNPCXY on the
+    follower, which can fail if the NPC array isn't populated in time.
+
+    Filters to same-party accounts via Party.GetPlayers() cross-reference so
+    bots running in other parties on the same machine are never dispatched to.
+    """
+    state: dict = {"done_at_ms": 0}
+
+    def _dispatch(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
+        from Py4GWCoreLib.GlobalCache import GLOBAL_CACHE
+        from Py4GWCoreLib import Player, Party, Console
+        from Py4GWCoreLib import ConsoleLog
+        from Py4GWCoreLib.enums_src.Multiboxing_enums import SharedCommandType
+        from Py4GWCoreLib.Py4GWcorelib import Utils
+
+        # BT.MoveAndInteract just returned SUCCESS in the same SequenceNode
+        # _tick_impl call, so the leader's target is guaranteed to be the NPC.
+        npc_id = int(Player.GetTargetID() or 0)
+
+        sender_email = str(Player.GetAccountEmail() or "")
+        all_accounts = list(GLOBAL_CACHE.ShMem.GetAllAccountData() or [])
+
+        # Cross-reference ShMem accounts against Party roster to exclude bots in
+        # other parties that happen to be running on the same machine.
+        party_agent_ids: set[int] = set()
+        for p in (Party.GetPlayers() or []):
+            login = int(getattr(p, "login_number", 0) or 0)
+            if login:
+                pid = int(Party.Players.GetAgentIDByLoginNumber(login) or 0)
+                if pid:
+                    party_agent_ids.add(pid)
+
+        followers = [
+            a for a in all_accounts
+            if str(getattr(a, "AccountEmail", "") or "") != sender_email
+            and int(a.AgentData.AgentID or 0) in party_agent_ids
+        ]
+        num_followers = len(followers)
+
+        ConsoleLog(
+            MODULE_NAME,
+            f"FollowerDialog dispatch: npc_id={npc_id}, dialog={dialog_id:#x}, party_followers={num_followers}",
+            Console.MessageType.Info,
+            True,
+        )
+
+        if npc_id > 0 and followers:
+            for follower in followers:
+                email = str(getattr(follower, "AccountEmail", "") or "")
+                if email:
+                    ConsoleLog(MODULE_NAME, f"  -> SendDialogToTarget({npc_id}, {dialog_id:#x}) -> {email}", Console.MessageType.Info, True)
+                    GLOBAL_CACHE.ShMem.SendMessage(
+                        sender_email,
+                        email,
+                        SharedCommandType.SendDialogToTarget,
+                        (float(npc_id), float(dialog_id), 0.0, 0.0),
+                    )
+        elif npc_id == 0:
+            ConsoleLog(MODULE_NAME, "  -> Skipped: leader has no NPC targeted (GetTargetID=0)", Console.MessageType.Warning, True)
+        else:
+            ConsoleLog(MODULE_NAME, "  -> Skipped: no same-party followers found", Console.MessageType.Warning, True)
+
+        state["done_at_ms"] = int(Utils.GetBaseTimestamp()) + (num_followers * per_account_wait_ms if num_followers > 0 else 0)
+        return BehaviorTree.NodeState.SUCCESS
+
+    def _wait(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
+        from Py4GWCoreLib.Py4GWcorelib import Utils
+        now = int(Utils.GetBaseTimestamp())
+        return (
+            BehaviorTree.NodeState.SUCCESS
+            if now >= state["done_at_ms"]
+            else BehaviorTree.NodeState.RUNNING
+        )
+
+    return RoutinesBT.Composite.Sequence(
+        BehaviorTree(
+            BehaviorTree.ActionNode(
+                name="FollowerNpcDialogDispatch",
+                action_fn=_dispatch,
+            )
+        ),
+        BehaviorTree(
+            BehaviorTree.WaitUntilNode(
+                name="FollowerNpcDialogWait",
+                condition_fn=_wait,
+                throttle_interval_ms=500,
+                timeout_ms=90000,
+            )
+        ),
+        name=name,
+    )
+
+
+def NPCQuest() -> BehaviorTree:
+    """Accept The Dreamer and the Zealot on all accounts."""
+    return BT.Sequence(
+        name='NPC Quest',
+        children=[
+            BT.MoveAndInteract(
+                QUEST_NPC_POS,
+                target_distance=Range.Area.value,
+                log=True,
+            ),
+            _follower_npc_dialog_node(
+                dialog_id=QUEST_ACCEPT_DIALOG,
+                name='FollowerQuestAcceptDialog',
+            ),
+            BT.Wait(500, log=True),
+            BT.SendDialog(QUEST_ACCEPT_DIALOG, log=True),
+        ],
+    )
+
+
+def Floor1ToFloor2() -> BehaviorTree:
+    return BT.Sequence(
+        name='Floor 1 to Floor 2',
+        children=[
             BT.VanquishNode([(-9672., -3286.)],  clear_area_radius=TUNNELS_AGGRO_RANGE, name='Floor1_Pt4'),
             BT.LootItems(),
             BT.VanquishNode([(-11186., -1788.)], clear_area_radius=TUNNELS_AGGRO_RANGE, name='Floor1_Pt5'),
@@ -219,119 +358,60 @@ def Floor2() -> BehaviorTree:
     )
 
 
-def _follower_npc_dialog_node(
-    dialog_id: int,
-    per_account_wait_ms: int = 8000,
-) -> BehaviorTree:
-    """Send a dialog to an NPC on all follower accounts.
-
-    Captures the leader's current target (set by MoveAndDialog immediately
-    before this node), sends SendDialogToTarget to every follower directly
-    via ShMem, then waits per_account_wait_ms per follower to complete.
-    Uses an ActionNode for immediate dispatch (no throttle delay) followed
-    by a WaitUntilNode for the timer.
-    """
-    state: dict = {"done_at_ms": 0}
-
-    def _dispatch(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
-        from Py4GWCoreLib.GlobalCache import GLOBAL_CACHE
-        from Py4GWCoreLib import Player
-        from Py4GWCoreLib.enums_src.Multiboxing_enums import SharedCommandType
-        from Py4GWCoreLib.Py4GWcorelib import Utils
-
-        npc_id = int(Player.GetTargetID() or 0)
-        sender_email = str(Player.GetAccountEmail() or "")
-        followers = [
-            a for a in (GLOBAL_CACHE.ShMem.GetAllAccountData() or [])
-            if str(getattr(a, "AccountEmail", "") or "") != sender_email
-        ]
-        num_followers = len(followers)
-
-        if npc_id > 0 and followers:
-            for follower in followers:
-                email = str(getattr(follower, "AccountEmail", "") or "")
-                if email:
-                    GLOBAL_CACHE.ShMem.SendMessage(
-                        sender_email,
-                        email,
-                        SharedCommandType.SendDialogToTarget,
-                        (float(npc_id), float(dialog_id), 0.0, 0.0),
-                    )
-
-        state["done_at_ms"] = int(Utils.GetBaseTimestamp()) + (num_followers * per_account_wait_ms if num_followers > 0 else 0)
-        return BehaviorTree.NodeState.SUCCESS
-
-    def _wait(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
-        from Py4GWCoreLib.Py4GWcorelib import Utils
-        now = int(Utils.GetBaseTimestamp())
-        return (
-            BehaviorTree.NodeState.SUCCESS
-            if now >= state["done_at_ms"]
-            else BehaviorTree.NodeState.RUNNING
-        )
-
-    return RoutinesBT.Composite.Sequence(
-        BehaviorTree(
-            BehaviorTree.ActionNode(
-                name="FollowerNpcDialogDispatch",
-                action_fn=_dispatch,
-            )
-        ),
-        BehaviorTree(
-            BehaviorTree.WaitUntilNode(
-                name="FollowerNpcDialogWait",
-                condition_fn=_wait,
-                throttle_interval_ms=500,
-                timeout_ms=90000,
-            )
-        ),
-        name="FollowerNpcDialog",
-    )
-
 
 def _open_chest_sequential_node() -> BehaviorTree:
-    """Send OpenChest cascade to follower accounts in party-position order.
+    """Open the dungeon chest on follower accounts one at a time in party-position order.
 
     The leader has already opened the chest via MoveAndInteractWithGadget.
-    This triggers the cascade so each follower opens it in sequence, waiting
-    long enough for all interactions to complete before the bot moves on.
-    """
-    PER_ACCOUNT_WAIT_MS = 5000  # 5 s per follower for chest-open animation + round-trip
+    Waits INITIAL_WAIT_MS after the leader opens, then sends InteractWithTarget to
+    each follower in turn, waiting PER_FOLLOWER_MS between each dispatch.
+    Uses InteractWithTarget (not OpenChest, which requires lockpicks) since the
+    TOTF dungeon chest is unlocked.
 
-    state: dict = {"initialized": False, "done_at_ms": 0}
+    Each phase always returns explicitly — no fall-through between phases.
+    """
+    INITIAL_WAIT_MS = 2000    # let the leader's chest animation finish first
+    PER_FOLLOWER_MS = 10000   # per-follower budget: walk + open animation + buffer
+
+    state: dict = {
+        "phase": "init",      # init | wait_init | send | wait_between
+        "followers": [],
+        "current_idx": 0,
+        "chest_id": 0,
+        "sender_email": "",
+        "wait_until_ms": 0,
+    }
 
     def _run(node: BehaviorTree.Node) -> BehaviorTree.NodeState:
         from Py4GWCoreLib.GlobalCache import GLOBAL_CACHE
-        from Py4GWCoreLib import Player, Party
+        from Py4GWCoreLib import Player, Party, Console
+        from Py4GWCoreLib import ConsoleLog
         from Py4GWCoreLib.enums_src.Multiboxing_enums import SharedCommandType
         from Py4GWCoreLib.Py4GWcorelib import Utils
 
         now = int(Utils.GetBaseTimestamp())
 
-        if state["initialized"]:
-            return (
-                BehaviorTree.NodeState.SUCCESS
-                if now >= state["done_at_ms"]
-                else BehaviorTree.NodeState.RUNNING
-            )
+        if state["phase"] == "init":
+            chest_id = int(Player.GetTargetID() or 0)
+            sender_email = str(Player.GetAccountEmail() or "")
 
-        state["initialized"] = True
-
-        # Use the leader's current target — set by MoveAndInteractWithGadget immediately before
-        chest_id = int(Player.GetTargetID() or 0)
-
-        sender_email = str(Player.GetAccountEmail() or "")
-        followers = [
-            a for a in (GLOBAL_CACHE.ShMem.GetAllAccountData() or [])
-            if str(getattr(a, "AccountEmail", "") or "") != sender_email
-        ]
-        num_followers = len(followers)
-
-        if chest_id > 0 and followers:
             players_list = list(Party.GetPlayers() or [])
+            party_agent_ids: set[int] = set()
+            for _p in players_list:
+                _login = int(getattr(_p, "login_number", 0) or 0)
+                if _login:
+                    _pid = int(Party.Players.GetAgentIDByLoginNumber(_login) or 0)
+                    if _pid:
+                        party_agent_ids.add(_pid)
+
+            all_followers = [
+                a for a in (GLOBAL_CACHE.ShMem.GetAllAccountData() or [])
+                if str(getattr(a, "AccountEmail", "") or "") != sender_email
+                and int(a.AgentData.AgentID or 0) in party_agent_ids
+            ]
 
             def _party_pos(account) -> int:
-                agent_id = int(getattr(account, "PlayerID", 0) or 0)
+                agent_id = int(account.AgentData.AgentID or 0)
                 for i, p in enumerate(players_list):
                     login = int(getattr(p, "login_number", 0) or 0)
                     if not login:
@@ -341,32 +421,86 @@ def _open_chest_sequential_node() -> BehaviorTree:
                         return i
                 return 999
 
-            followers.sort(key=_party_pos)
-            first_email = str(getattr(followers[0], "AccountEmail", "") or "")
-            if first_email:
-                GLOBAL_CACHE.ShMem.SendMessage(
-                    sender_email,
-                    first_email,
-                    SharedCommandType.OpenChest,
-                    (float(chest_id), 1.0, 0.0, 0.0),
-                )
+            state["chest_id"] = chest_id
+            state["sender_email"] = sender_email
+            state["followers"] = sorted(all_followers, key=_party_pos)
+            state["current_idx"] = 0
 
-        state["done_at_ms"] = now + max(3000, num_followers * PER_ACCOUNT_WAIT_MS)
-        return BehaviorTree.NodeState.RUNNING
+            ConsoleLog(
+                MODULE_NAME,
+                f"ChestSequential: chest_id={chest_id}, followers={len(state['followers'])}",
+                Console.MessageType.Info,
+                True,
+            )
+
+            if chest_id == 0:
+                ConsoleLog(MODULE_NAME, "ChestSequential: no chest targeted, skipping", Console.MessageType.Warning, True)
+                return BehaviorTree.NodeState.SUCCESS
+            if not state["followers"]:
+                ConsoleLog(MODULE_NAME, "ChestSequential: no same-party followers, skipping", Console.MessageType.Warning, True)
+                return BehaviorTree.NodeState.SUCCESS
+
+            state["wait_until_ms"] = now + INITIAL_WAIT_MS
+            state["phase"] = "wait_init"
+            return BehaviorTree.NodeState.RUNNING
+
+        if state["phase"] == "wait_init":
+            if now < state["wait_until_ms"]:
+                return BehaviorTree.NodeState.RUNNING
+            state["phase"] = "send"
+            return BehaviorTree.NodeState.RUNNING
+
+        if state["phase"] == "send":
+            idx = state["current_idx"]
+            if idx >= len(state["followers"]):
+                ConsoleLog(MODULE_NAME, "ChestSequential: all followers done", Console.MessageType.Info, True)
+                return BehaviorTree.NodeState.SUCCESS
+
+            follower = state["followers"][idx]
+            email = str(getattr(follower, "AccountEmail", "") or "")
+            ConsoleLog(
+                MODULE_NAME,
+                f"ChestSequential [{idx + 1}/{len(state['followers'])}]: InteractWithTarget -> {email}",
+                Console.MessageType.Info,
+                True,
+            )
+            if email:
+                GLOBAL_CACHE.ShMem.SendMessage(
+                    state["sender_email"],
+                    email,
+                    SharedCommandType.InteractWithTarget,
+                    (float(state["chest_id"]), 0.0, 0.0, 0.0),
+                )
+            state["current_idx"] += 1
+            state["wait_until_ms"] = now + PER_FOLLOWER_MS
+            state["phase"] = "wait_between"
+            return BehaviorTree.NodeState.RUNNING
+
+        if state["phase"] == "wait_between":
+            if now < state["wait_until_ms"]:
+                return BehaviorTree.NodeState.RUNNING
+            state["phase"] = "send"
+            return BehaviorTree.NodeState.RUNNING
+
+        return BehaviorTree.NodeState.SUCCESS
 
     tree = BehaviorTree(
         BehaviorTree.WaitUntilNode(
             name="OpenChestSequential",
             condition_fn=_run,
             throttle_interval_ms=500,
-            timeout_ms=90000,
+            timeout_ms=120000,
         )
     )
     orig_reset = tree.root.reset
 
     def _reset() -> None:
-        state["initialized"] = False
-        state["done_at_ms"] = 0
+        state["phase"] = "init"
+        state["followers"] = []
+        state["current_idx"] = 0
+        state["chest_id"] = 0
+        state["sender_email"] = ""
+        state["wait_until_ms"] = 0
         orig_reset()
 
     tree.root.reset = _reset
@@ -423,11 +557,21 @@ def Floor3() -> BehaviorTree:
                 clear_area_radius=TUNNELS_AGGRO_RANGE,
                 name='Floor3_Route_D',
             ),
-            # Collect quest reward then open chest
-            BT.MoveAndDialog((-16098., -8626.), dialog_id=QUEST_REWARD_DIALOG),
-            _follower_npc_dialog_node(QUEST_REWARD_DIALOG),
-            BT.MoveAndInteractWithGadget((-16066., -8370.)),  # Leader opens chest
-            _open_chest_sequential_node(),                     # Followers open chest in party-position order
+            # Collect quest reward on all accounts. Followers receive
+            # SendDialogToTarget so they interact with the reward NPC independently.
+            BT.MoveAndInteract(
+                QUEST_REWARD_NPC_POS,
+                target_distance=Range.Area.value,
+                log=True,
+            ),
+            _follower_npc_dialog_node(
+                dialog_id=QUEST_REWARD_DIALOG,
+                name='FollowerQuestRewardDialog',
+            ),
+            BT.Wait(500, log=True),
+            BT.SendDialog(QUEST_REWARD_DIALOG, log=True),
+            BT.MoveAndInteractWithGadget(DUNGEON_CHEST_POS),  # Leader opens chest
+            _open_chest_sequential_node(),                     # Followers walk to and open chest
             BT.LootItems(),
             BT.Resign(wait_for_map_load=True, target_map_id=PIKEN_SQUARE, multi_account=True),
         ],
@@ -438,7 +582,9 @@ def get_execution_steps() -> list[tuple[str, Callable[[], BehaviorTree]]]:
     return [
         ('Initialize Bot',        InitializeBot),
         ('The Breach Approach',   TheBreachApproach),
-        ('Floor 1',               Floor1),
+        ('Floor 1 to NPC',        Floor1ToNPC),
+        ('NPC Quest',             NPCQuest),
+        ('Floor 1 to Floor 2',    Floor1ToFloor2),
         ('Floor 2',               Floor2),
         ('Floor 3',               Floor3),
     ]
